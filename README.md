@@ -48,8 +48,9 @@ pio device monitor
    Wemos einen Access Point **`Personenzaehler-xxxxxx`**, Passwort **`zaehler1`**.
 2. Verbinden – die Konfigseite öffnet sich meist automatisch (Captive Portal),
    sonst `http://192.168.4.1/config` aufrufen.
-3. WLAN und optional MQTT eintragen, speichern → Neustart.
-4. Danach erreichbar unter `http://personenzaehler.local` bzw. der IP (siehe Router/seriellen Monitor).
+3. Anmelden mit Benutzer **`admin`**, Passwort **`zaehler1`**.
+4. WLAN und optional MQTT eintragen, **Admin-Passwort ändern**, speichern → Neustart.
+5. Danach erreichbar unter `http://personenzaehler.local` bzw. der IP (siehe Router/seriellen Monitor).
 
 Ist ein WLAN konfiguriert, aber nicht erreichbar, versucht das Gerät es im AP-Modus alle
 5 Minuten erneut (sofern gerade niemand mit dem AP verbunden ist).
@@ -59,10 +60,34 @@ Ist ein WLAN konfiguriert, aber nicht erreichbar, versucht das Gerät es im AP-M
 | URL           | Funktion                                   |
 |---------------|--------------------------------------------|
 | `/`           | Zähler, Live-Sensorwerte, Reset-Button     |
-| `/config`     | WLAN-, MQTT- und Sensor-Einstellungen      |
+| `/config`     | WLAN-, MQTT- und Sensor-Einstellungen (Login) |
+| `/update`     | Firmware-Update über den Browser (Login)   |
 | `/log`        | Konsolen-Log live im Browser, Debugmodus   |
 | `/api/status` | Status als JSON                            |
 | `/api/reset`  | POST: Zähler zurücksetzen                  |
+
+Konfiguration und Update sind mit Benutzer `admin` und dem Admin-Passwort geschützt
+(Standard `zaehler1`, in der Konfig änderbar). Zähler, Reset und Log sind ohne Login erreichbar.
+
+## Update über WLAN (OTA)
+
+Die Firmware-Version steht auf der Hauptseite und im Log.
+
+**Im Browser:**
+1. `pio run` – erzeugt `.pio/build/d1_mini/firmware.bin`
+2. `http://personenzaehler.local/update` öffnen, anmelden, Datei wählen, hochladen.
+3. Das Gerät startet danach automatisch neu.
+
+**Direkt aus PlatformIO:**
+
+```
+pio run -e d1_mini_ota -t upload
+```
+
+In [platformio.ini](platformio.ini) unter `[env:d1_mini_ota]` ggf. `upload_port`
+(Hostname oder IP) und `--auth` (Admin-Passwort) anpassen. Im AP-Modus ist die IP `192.168.4.1`.
+
+Konfiguration und Zählerstand bleiben bei einem Update erhalten.
 
 ## Debugging
 

@@ -12,6 +12,7 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#include <ArduinoOTA.h>
 #include <DNSServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -29,7 +30,11 @@ constexpr uint8_t ADDR_A = 0x30;
 constexpr uint8_t ADDR_B = 0x31;
 
 // --- Allgemein -------------------------------------------------------------
+#define FW_VERSION "1.1.0"
+constexpr char FW_BUILD[] = FW_VERSION " (" __DATE__ " " __TIME__ ")";
 constexpr char AP_PASSWORD[] = "zaehler1";          // min. 8 Zeichen, leer = offenes WLAN
+constexpr char ADMIN_USER[] = "admin";               // Benutzer für die Update-Seite
+constexpr char DEFAULT_ADMIN_PASS[] = "zaehler1";    // Update-Passwort, in der Konfig änderbar
 constexpr uint32_t WIFI_CONNECT_TIMEOUT = 20000;     // ms
 constexpr uint32_t AP_RETRY_INTERVAL = 5UL * 60000;  // im AP-Modus alle 5 min WLAN neu versuchen
 constexpr uint32_t COUNT_SAVE_INTERVAL = 60000;      // Zählerstand max. 1x pro Minute ins Flash
@@ -52,6 +57,7 @@ struct Config {
   uint16_t threshold = 1000;  // mm
   bool invert = false;
   bool longRange = false;  // false: Short-Modus, 50 Hz, bis ~1.3 m / true: Medium, 30 Hz, bis ~2.9 m
+  String adminPass = DEFAULT_ADMIN_PASS;  // schützt Web-Update und ArduinoOTA
 } cfg;
 
 ESP8266WebServer server(80);
@@ -150,6 +156,7 @@ void loadConfig() {
     cfg.threshold = doc["threshold"] | 1000;
     cfg.invert = doc["invert"] | false;
     cfg.longRange = doc["long_range"] | false;
+    cfg.adminPass = doc["admin_pass"] | DEFAULT_ADMIN_PASS;
   }
   f.close();
 }
@@ -167,6 +174,7 @@ void saveConfig() {
   doc["threshold"] = cfg.threshold;
   doc["invert"] = cfg.invert;
   doc["long_range"] = cfg.longRange;
+  doc["admin_pass"] = cfg.adminPass;
   File f = LittleFS.open(CONFIG_FILE, "w");
   if (!f) return;
   serializeJson(doc, f);
@@ -470,6 +478,7 @@ void handleStatus() {
                 : mqtt.connected()     ? "verbunden"
                                        : "getrennt";
   doc["uptime"] = millis() / 1000;
+  doc["version"] = FW_BUILD;
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -509,6 +518,7 @@ void handleSaveConfig() {
   if (server.arg("threshold").toInt() > 0) cfg.threshold = server.arg("threshold").toInt();
   cfg.invert = server.hasArg("invert");
   cfg.longRange = server.hasArg("long_range");
+  if (server.arg("admin_pass").length()) cfg.adminPass = server.arg("admin_pass");
 
   saveConfig();
   saveCounts();
@@ -558,6 +568,85 @@ void handleDebug() {
   server.send(200, "application/json", debugMode ? "{\"debug\":true}" : "{\"debug\":false}");
 }
 
+// ---------------------------------------------------------------------------
+// Login & OTA-Update über den Browser
+// ---------------------------------------------------------------------------
+bool updateAuthorized = false;
+String updateError;
+
+bool checkAdmin() {
+  if (server.authenticate(ADMIN_USER, cfg.adminPass.c_str())) return true;
+  server.requestAuthentication(BASIC_AUTH, "Personenzaehler", "Anmeldung erforderlich");
+  return false;
+}
+
+// Wrapper: Handler nur nach erfolgreicher Anmeldung ausführen
+template <typename F>
+std::function<void()> protect(F handler) {
+  return [handler] {
+    if (checkAdmin()) handler();
+  };
+}
+
+void handleUpdateUpload() {
+  HTTPUpload &up = server.upload();
+
+  if (up.status == UPLOAD_FILE_START) {
+    updateError = "";
+    updateAuthorized = server.authenticate(ADMIN_USER, cfg.adminPass.c_str());
+    if (!updateAuthorized) return;
+    logMsg("Web-Update gestartet: %s", up.filename.c_str());
+    if (countsDirty) saveCounts();
+    uint32_t maxSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+    if (!Update.begin(maxSpace, U_FLASH)) updateError = Update.getErrorString();
+    return;
+  }
+  if (!updateAuthorized || updateError.length()) return;
+
+  if (up.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) updateError = Update.getErrorString();
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) logMsg("Web-Update erfolgreich: %u Bytes", (unsigned)up.totalSize);
+    else updateError = Update.getErrorString();
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    Update.end();
+    updateError = "Upload abgebrochen";
+  }
+}
+
+void handleUpdateDone() {
+  if (!updateAuthorized) {
+    server.requestAuthentication(BASIC_AUTH, "Personenzaehler", "Anmeldung erforderlich");
+    return;
+  }
+  if (updateError.length()) {
+    logMsg("Web-Update fehlgeschlagen: %s", updateError.c_str());
+    server.send(500, "text/plain", "Fehler: " + updateError);
+    return;
+  }
+  server.send(200, "text/plain", "OK");
+  restartAt = millis() + 1000;
+}
+
+// ---------------------------------------------------------------------------
+// OTA-Update direkt aus PlatformIO / Arduino IDE (espota, Port 8266)
+// ---------------------------------------------------------------------------
+void setupArduinoOTA() {
+  ArduinoOTA.setHostname(cfg.hostname.c_str());
+  ArduinoOTA.setPassword(cfg.adminPass.c_str());
+  ArduinoOTA.onStart([] {
+    if (ArduinoOTA.getCommand() == U_FS) {
+      LittleFS.end();  // Dateisystem wird überschrieben
+    } else if (countsDirty) {
+      saveCounts();
+    }
+    logMsg("OTA-Update gestartet (%s)", ArduinoOTA.getCommand() == U_FS ? "Dateisystem" : "Firmware");
+  });
+  ArduinoOTA.onEnd([] { logMsg("OTA-Update fertig - Neustart"); });
+  ArduinoOTA.onError([](ota_error_t e) { logMsg("OTA-Update fehlgeschlagen, Fehler %u", e); });
+  ArduinoOTA.begin(false);  // mDNS wird in setup() selbst verwaltet
+}
+
 void handleNotFound() {
   if (apMode) {
     // Captive Portal: alle unbekannten Anfragen auf die Konfigseite umleiten
@@ -570,12 +659,14 @@ void handleNotFound() {
 
 void setupWebServer() {
   server.on("/", HTTP_GET, [] { server.send_P(200, "text/html", INDEX_HTML); });
-  server.on("/config", HTTP_GET, [] { server.send_P(200, "text/html", CONFIG_HTML); });
-  server.on("/config", HTTP_POST, handleSaveConfig);
+  server.on("/config", HTTP_GET, protect([] { server.send_P(200, "text/html", CONFIG_HTML); }));
+  server.on("/config", HTTP_POST, protect(handleSaveConfig));
   server.on("/api/status", HTTP_GET, handleStatus);
   server.on("/api/reset", HTTP_POST, handleReset);
-  server.on("/api/config", HTTP_GET, handleGetConfig);
-  server.on("/api/scan", HTTP_GET, handleScan);
+  server.on("/api/config", HTTP_GET, protect(handleGetConfig));
+  server.on("/api/scan", HTTP_GET, protect(handleScan));
+  server.on("/update", HTTP_GET, protect([] { server.send_P(200, "text/html", UPDATE_HTML); }));
+  server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   server.on("/log", HTTP_GET, [] { server.send_P(200, "text/html", LOG_HTML); });
   server.on("/api/log", HTTP_GET, handleLog);
   server.on("/api/debug", HTTP_POST, handleDebug);
@@ -587,7 +678,7 @@ void setupWebServer() {
 void setup() {
   Serial.begin(115200);
   Serial.println();
-  logMsg("Personenzähler startet (Reset-Grund: %s)", ESP.getResetReason().c_str());
+  logMsg("Personenzähler %s startet (Reset-Grund: %s)", FW_BUILD, ESP.getResetReason().c_str());
 
   WiFi.persistent(false);  // Zugangsdaten nicht zusätzlich im SDK-Flash speichern
 
@@ -613,7 +704,9 @@ void setup() {
   if (!apMode) {
     MDNS.begin(cfg.hostname);
     MDNS.addService("http", "tcp", 80);
+    MDNS.enableArduino(8266, true);  // OTA-Ziel in PlatformIO/Arduino IDE sichtbar machen
   }
+  setupArduinoOTA();
 
   mqtt.setServer(cfg.mqttHost.c_str(), cfg.mqttPort);
   mqtt.setCallback(mqttCallback);
@@ -664,6 +757,7 @@ void loop() {
   }
 
   server.handleClient();
+  ArduinoOTA.handle();
   mqttLoop();
 
   if (countsDirty && !passageActive && millis() - lastCountSave > COUNT_SAVE_INTERVAL) saveCounts();

@@ -38,6 +38,7 @@ a{color:#06c}
   <div class="sens"><div id="sa">A (aussen)<br>–</div><div id="sb">B (innen)<br>–</div></div>
   <p><small id="info"></small></p>
   <a href="/config">&#9881; Konfiguration</a> &nbsp;&middot;&nbsp; <a href="/log">&#128196; Log</a>
+  &nbsp;&middot;&nbsp; <a href="/update">&#11014; Update</a>
 </div>
 <script>
 const $=id=>document.getElementById(id);
@@ -53,7 +54,8 @@ async function upd(){
     $('sa').className=d.occA?'on':'';
     $('sb').className=d.occB?'on':'';
     $('info').innerHTML=(d.sensors?'':'<b style="color:#d33">Sensorfehler!</b><br>')+
-      'Modus: '+d.mode+' &middot; IP: '+d.ip+'<br>MQTT: '+d.mqtt+' &middot; Laufzeit: '+Math.floor(d.uptime/60)+' min';
+      'Modus: '+d.mode+' &middot; IP: '+d.ip+'<br>MQTT: '+d.mqtt+' &middot; Laufzeit: '+Math.floor(d.uptime/60)+' min'+
+      '<br>Firmware: '+d.version;
   }catch(e){}
 }
 function doReset(){
@@ -115,6 +117,11 @@ a{color:#06c}
   <input type="number" name="threshold" min="50" max="4000">
   <div class="chk"><input type="checkbox" name="invert" id="invert"><label for="invert" style="margin:0">Richtung umkehren (A = innen, B = aussen)</label></div>
   <div class="chk"><input type="checkbox" name="long_range" id="long_range"><label for="long_range" style="margin:0">Grosse Reichweite (bis ~2.9 m statt ~1.3 m, aber langsamer: 30 statt 50 Messungen/s)</label></div>
+</div>
+<div class="card">
+  <h1>Sicherheit</h1>
+  <label>Admin-Passwort für Konfiguration &amp; Update <small>(Benutzer: admin, leer = unverändert)</small></label>
+  <input type="password" name="admin_pass" autocomplete="new-password">
   <button type="submit">Speichern &amp; Neustart</button>
 </div>
 </form>
@@ -187,6 +194,63 @@ function setDebug(){
   fetch('/api/debug?on='+(document.getElementById('dbg').checked?1:0),{method:'POST'});
 }
 setInterval(poll,1000);poll();
+</script>
+</body></html>
+)rawliteral";
+
+// ---------------------------------------------------------------------------
+// Update-Seite: Firmware (.bin) über den Browser hochladen
+// ---------------------------------------------------------------------------
+const char UPDATE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Firmware-Update</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#f4f5f7;color:#222;margin:0;padding:16px}
+.card{max-width:420px;margin:0 auto 16px;background:#fff;border-radius:12px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.1)}
+h1{font-size:1.2em;margin:0 0 12px}
+input[type=file]{width:100%;margin:8px 0}
+button{width:100%;padding:12px;font-size:1em;border:0;border-radius:8px;background:#06c;color:#fff;margin-top:12px;cursor:pointer}
+button:disabled{background:#999}
+.bar{height:18px;background:#eee;border-radius:9px;overflow:hidden;margin-top:16px}
+.bar div{height:100%;width:0;background:#2a2;transition:width .2s}
+small{color:#888}
+a{color:#06c}
+</style></head><body>
+<div class="card">
+  <h1>Firmware-Update</h1>
+  <p><small>Aktuell: <span id="ver">–</span></small></p>
+  <p><small>Datei: <b>.pio/build/d1_mini/firmware.bin</b> (nach <i>pio run</i>)</small></p>
+  <input type="file" id="file" accept=".bin,.bin.gz">
+  <button id="btn" onclick="upload()">Hochladen &amp; installieren</button>
+  <div class="bar"><div id="prog"></div></div>
+  <p id="msg"></p>
+</div>
+<div class="card"><a href="/">&larr; Zurück zum Zähler</a></div>
+<script>
+const $=id=>document.getElementById(id);
+fetch('/api/status').then(r=>r.json()).then(d=>$('ver').textContent=d.version);
+function upload(){
+  const f=$('file').files[0];
+  if(!f){$('msg').textContent='Bitte zuerst eine Datei wählen.';return;}
+  $('btn').disabled=true;
+  $('msg').textContent='Lade hoch…';
+  const fd=new FormData();fd.append('firmware',f,f.name);
+  const x=new XMLHttpRequest();
+  x.upload.onprogress=e=>{if(e.lengthComputable)$('prog').style.width=(e.loaded/e.total*100)+'%';};
+  x.onload=()=>{
+    if(x.status==200){
+      $('msg').textContent='Update erfolgreich – Gerät startet neu…';
+      setTimeout(()=>location.href='/',15000);
+    }else{
+      $('msg').textContent=x.responseText||('Fehler '+x.status);
+      $('btn').disabled=false;
+    }
+  };
+  x.onerror=()=>{$('msg').textContent='Verbindung unterbrochen.';$('btn').disabled=false;};
+  x.open('POST','/update');
+  x.send(fd);
+}
 </script>
 </body></html>
 )rawliteral";
